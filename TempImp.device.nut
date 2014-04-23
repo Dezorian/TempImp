@@ -3,16 +3,18 @@ temp.configure(ANALOG_IN);
 led <- hardware.pin2;
 led.configure(DIGITAL_OUT);
 
-temperatureSamples <- 10; //number of temperature samples per measurement MAX 10!
+temperatureSamples <- 10; //number of temperature samples per measurement
 periodShort <- 10; //minutes
 periodLong <-  3; //Hours
+maxTemp <- 50;
+minTemp <- -20;
 d <- date();
 
 //Get non volatile variables
 function loadNonVolatileVariables()
 {
   if (!("nv" in getroottable())) {
-    nv <- { currentEnabled = true, trendEnabled = false };
+    nv <- { currentEnabled = true, trendEnabled = false , lastTempValue = -999};
   }
 }
  
@@ -54,41 +56,40 @@ function doWork() {
   
   //4.
   imp.onidle(function() {
-    imp.deepsleepfor(10 - (time() % 10)); //Sleep for 60 seconds
+    imp.deepsleepfor(10 - (time() % 10)); //Sleep for 10 seconds
   }); 
 }
 
 //Send temperature to the agent
 function sendTemperature(trend) {
   local temperature = getAverageTemperature();
-  local formattedTemperature = format("%.01f", temperature);
   
-  if (trend)
+  if (temperature == -999)
   {
-    agent.send("updateTemp", [formattedTemperature, "Trend"]);
-    imp.sleep(15);
-    agent.send("updateTemp", [formattedTemperature, "Current"]);
+    server.log("Invalid temperature found.");
   }
   else
   {
-    agent.send("updateTemp", [formattedTemperature, "Current"]);
+    nv.lastTempValue = temperature;
+    local formattedTemperature = format("%.01f", temperature);
+    
+    if (trend)
+    {
+      agent.send("updateTemp", [formattedTemperature, "Trend"]);
+      imp.sleep(15);
+      agent.send("updateTemp", [formattedTemperature, "Current"]);
+    }
+    else
+    {
+      agent.send("updateTemp", [formattedTemperature, "Current"]);
+    }
   }
-  
   server.expectonlinein(periodShort * 60);
-}
-
-//Get temperature from sensor, formula: ºC = 100 * V - 50.
-function getTemperatureSample()
-{
-  local supplyVoltage = hardware.voltage();
-  local voltageRead =  supplyVoltage * (temp.read() / 65535.0); //Get millivolts reading
-  return (voltageRead - 0.5) * 100; //Celcius
 }
 
 //Get the average temperature from X samples
 function getAverageTemperature()
 {
-  local sum = 0;
   local temperatureArray = [];
   
   for(local i = 0; i < temperatureSamples; i++)
@@ -97,12 +98,35 @@ function getAverageTemperature()
     imp.sleep(0.1);
   }
   
+  local validValues = 0;
+  local sum = 0;
+  
   for(local i = 0; i < temperatureSamples; i++)
   {
-    sum = sum + temperatureArray[i];
+    local value = temperatureArray[i];
+    
+    if(nv.lastTempValue == -999) nv.lastTempValue = value; //Initialize the first stored value 
+    
+    if ( (value < maxTemp) 
+      && (value > minTemp) 
+      && (value < (nv.lastTempValue + 10))
+      && (value > (nv.lastTempValue - 10)))
+    {
+      sum += value;
+      validValues++;
+    }
   }
   
-  return (sum / temperatureSamples);
+  if (validValues == 0) return -999; //no valid temperature found
+  else return (sum / validValues);
+}
+
+//Get temperature from sensor, formula: ºC = 100 * V - 50.
+function getTemperatureSample()
+{
+  local supplyVoltage = hardware.voltage();
+  local voltageRead =  supplyVoltage * (temp.read() / 65535.0); //Get millivolts reading
+  return (voltageRead - 0.5) * 100; //Celcius
 }
 
 function flashLed()
